@@ -76,6 +76,11 @@ namespace QWK {
         // For emulating traditional icon button behavior
         uint64_t iconButtonClickTime = 0;
         int iconButtonClickLevel = 0;
+
+    private:
+        bool isMinimized = false;
+        // Save the placement information of the window
+        WINDOWPLACEMENT savedWindowPlacement = {sizeof(WINDOWPLACEMENT) };
     };
 
 }

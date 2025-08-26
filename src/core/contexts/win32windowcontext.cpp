@@ -1921,6 +1921,76 @@ namespace QWK {
                 break;
             }
 
+            case WM_NCLBUTTONDBLCLK: {
+                // When double-clicking the title bar, switch the window to the maximum/normal state
+                if (wParam == HTCAPTION) {
+                    if (isMaximized(hWnd)) {
+                        ::ShowWindow(hWnd, SW_RESTORE);
+                    } else {
+                        ::ShowWindow(hWnd, SW_MAXIMIZE);
+                    }
+                    *result = 0; // Indicates that this message has been processed
+                    return true;
+                }
+                break;
+            }
+
+            case WM_SYSCOMMAND: {
+                // Check if it is a command related to the window status
+                switch (wParam & 0xFFF0) { // The lower four digits are reserved by the system
+                    case SC_MINIMIZE: {
+                        // Save the current state of the window before minimizing
+                        WINDOWPLACEMENT wp = { sizeof(wp) };
+                        if (::GetWindowPlacement(hWnd, &wp)) {
+                            savedWindowPlacement = wp;
+                        }
+                        break;
+                    }
+                    case SC_MAXIMIZE: {
+                        // Save the maximized state
+                        WINDOWPLACEMENT wp = { sizeof(wp) };
+                        if (::GetWindowPlacement(hWnd, &wp)) {
+                            savedWindowPlacement = wp;
+                        }
+                        break;
+                    }
+                    case SC_RESTORE: {
+                        // When restoring the window, check the previously saved state
+                        if (savedWindowPlacement.showCmd == SW_SHOWMAXIMIZED) {
+                            ::ShowWindow(hWnd, SW_MAXIMIZE);
+                            *result = 0;
+                            return true;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                break;
+            }
+
+            case WM_SIZE: {
+                if (wParam == SIZE_MAXIMIZED) {
+                    // Save the maximized state
+                    WINDOWPLACEMENT wp = { sizeof(wp) };
+                    if (::GetWindowPlacement(hWnd, &wp)) {
+                        savedWindowPlacement = wp;
+                    }
+                } else if (wParam == SIZE_RESTORED) {
+                    // Save the state only when it is not restored from the minimized state
+                    if (!isMinimized) {
+                        WINDOWPLACEMENT wp = { sizeof(wp) };
+                        if (::GetWindowPlacement(hWnd, &wp)) {
+                          savedWindowPlacement = wp;
+                        }
+                    }
+                    isMinimized = false;
+                } else if (wParam == SIZE_MINIMIZED) {
+                    isMinimized = true;
+                }
+                break;
+            }
+
             default:
                 break;
         }
