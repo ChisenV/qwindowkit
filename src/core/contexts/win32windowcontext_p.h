@@ -77,6 +77,9 @@ namespace QWK {
         uint64_t iconButtonClickTime = 0;
         int iconButtonClickLevel = 0;
 
+        // Attributes
+        bool noSystemMenu = false;
+
     private:
         bool isMinimized = false;
         // Save the placement information of the window
