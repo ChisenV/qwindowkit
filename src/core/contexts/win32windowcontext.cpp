@@ -508,8 +508,8 @@ namespace QWK {
         bool nativeEventFilter(const QByteArray &eventType, void *message,
                                QT_NATIVE_EVENT_RESULT_TYPE *result) override {
             Q_UNUSED(eventType)
-            Q_ASSERT(message);
-            Q_ASSERT(result);
+            // Q_ASSERT(message);
+            // Q_ASSERT(result);
 
             // It has been observed that the pointer that Qt gives us is sometimes null on some
             // machines. We need to guard against it in such scenarios.
@@ -2016,14 +2016,6 @@ namespace QWK {
             case WM_SYSCOMMAND: {
                 // Check if it is a command related to the window status
                 switch (wParam & 0xFFF0) { // The lower four digits are reserved by the system
-                    case SC_MINIMIZE: {
-                        // Save the current state of the window before minimizing
-                        WINDOWPLACEMENT wp = { sizeof(wp) };
-                        if (::GetWindowPlacement(hWnd, &wp)) {
-                            savedWindowPlacement = wp;
-                        }
-                        break;
-                    }
                     case SC_MAXIMIZE: {
                         // Save the maximized state
                         WINDOWPLACEMENT wp = { sizeof(wp) };
@@ -2060,6 +2052,7 @@ namespace QWK {
                     if (::GetWindowPlacement(hWnd, &wp)) {
                         savedWindowPlacement = wp;
                     }
+                    isMinimized = false;
                 } else if (wParam == SIZE_RESTORED) {
                     // Save the state only when it is not restored from the minimized state
                     if (!isMinimized) {
