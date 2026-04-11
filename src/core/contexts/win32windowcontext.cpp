@@ -2035,7 +2035,13 @@ namespace QWK {
                     case SC_RESTORE: {
                         // When restoring the window, check the previously saved state
                         if (savedWindowPlacement.showCmd == SW_SHOWMAXIMIZED) {
-                            ::ShowWindow(hWnd, SW_MAXIMIZE);
+                            if (isMaximized(hWnd)) {
+                                // This means reverting from maximized to normal
+                                ::ShowWindow(hWnd, SW_RESTORE);
+                            } else {
+                                // This means reverting from minimized to maximized
+                                ::ShowWindow(hWnd, SW_MAXIMIZE);
+                            }
                             *result = 0;
                             return true;
                         }
@@ -2059,7 +2065,7 @@ namespace QWK {
                     if (!isMinimized) {
                         WINDOWPLACEMENT wp = { sizeof(wp) };
                         if (::GetWindowPlacement(hWnd, &wp)) {
-                          savedWindowPlacement = wp;
+                            savedWindowPlacement = wp;
                         }
                     }
                     isMinimized = false;

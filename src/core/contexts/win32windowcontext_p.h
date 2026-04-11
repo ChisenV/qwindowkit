@@ -83,7 +83,7 @@ namespace QWK {
     private:
         bool isMinimized = false;
         // Save the placement information of the window
-        WINDOWPLACEMENT savedWindowPlacement = {sizeof(WINDOWPLACEMENT) };
+        WINDOWPLACEMENT savedWindowPlacement = { sizeof(WINDOWPLACEMENT) };
     };
 
 }
