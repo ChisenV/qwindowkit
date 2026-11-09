@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -36,7 +36,8 @@ namespace QWK {
     }
 
     void StyleAgentPrivate::notifyAccentColorChanged(const QColor &color) {
-        Q_ASSERT(color.isValid());
+        // An invalid color is not a programming error: the platform code legitimately reports
+        // one when it cannot determine the accent color (a failed registry read, for example).
         if (color == systemAccentColor)
             return;
         systemAccentColor = color;

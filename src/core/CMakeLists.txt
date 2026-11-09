@@ -84,18 +84,26 @@ if(QWINDOWKIT_ENABLE_STYLE_AGENT)
         list(APPEND _src style/styleagent_linux.cpp)
     endif()
 else()
-    list(APPEND _sync_include_options EXCLUDE "src/core/style/\\.+")
+    # Matched against the path relative to this directory. The pattern used to be
+    # "src/core/style/\\.+", which requires a literal dot after the slash and therefore excluded
+    # nothing, so the headers were installed without the implementation.
+    list(APPEND _sync_include_options EXCLUDE "^style/")
 endif()
 
-qwk_add_library(${PROJECT_NAME} AUTOGEN
+qwk_add_library(${PROJECT_NAME} QT_AUTOGEN
     SOURCES ${_src}
     FEATURES cxx_std_17
     LINKS_PRIVATE ${_links_private}
     QT_LINKS Core Gui
     QT_INCLUDE_PRIVATE Core Gui
-    INCLUDE_PRIVATE *
-    PREFIX QWK_CORE
-    SYNC_INCLUDE_OPTIONS ${_sync_include_options}
+    INCLUDE_PRIVATE . contexts kernel shared style
+    MACRO_PREFIX QWK_CORE
+)
+
+qwk_sync_headers(${PROJECT_NAME}
+    BUILD_DIR ${QWINDOWKIT_BUILD_INCLUDE_DIR}
+    INSTALL_DIR "${QWINDOWKIT_HEADER_INSTALL_DIR}"
+    ${_sync_include_options}
 )
 
 set(QWINDOWKIT_ENABLED_TARGETS ${QWINDOWKIT_ENABLED_TARGETS} ${PROJECT_NAME} PARENT_SCOPE)

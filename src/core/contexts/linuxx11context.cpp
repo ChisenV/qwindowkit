@@ -1,5 +1,5 @@
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2025-2027 Wing-summer (wingsummer)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -135,6 +135,12 @@ namespace QWK {
 
     void LinuxX11Context::virtual_hook(int id, void *data) {
         if (id == ShowSystemMenuHook) {
+            // showSystemMenu() is public API and may be called before the window is created or
+            // after it has been destroyed.
+            if (!m_windowId || !m_windowHandle) {
+                return;
+            }
+
             auto *x11app = qApp->nativeInterface<QNativeInterface::QX11Application>();
             if (!x11app) {
                 return;

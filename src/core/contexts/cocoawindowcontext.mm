@@ -1,8 +1,12 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cocoawindowcontext_p.h"
+
+#include <algorithm>
+#include <atomic>
+#include <memory>
 
 #include <objc/runtime.h>
 #include <AppKit/AppKit.h>
@@ -10,6 +14,7 @@
 #include <Cocoa/Cocoa.h>
 
 #include <QtGui/QGuiApplication>
+#include <QtGui/QColor>
 
 #include "qwkglobal_p.h"
 #include "systemwindow_p.h"
@@ -154,6 +159,12 @@ namespace QWK {
             None,
         };
 
+        enum class GlassMode {
+            Regular,
+            Clear,
+            None,
+        };
+
         NSWindowProxy(NSView *macView) {
             nsview = macView;
 
@@ -167,6 +178,8 @@ namespace QWK {
         }
 
         ~NSWindowProxy() override {
+            lifetimeToken->store(false, std::memory_order_release);
+            
             [buttonObserver release];
 
             [nsview removeObserver:observer forKeyPath:@"window"];
@@ -244,16 +257,46 @@ namespace QWK {
                 return;
             }
             const auto &buttons = systemButtons();
-            const auto &leftButton = buttons[0];
-            const auto &midButton = buttons[1];
-            const auto &rightButton = buttons[2];
+            NSButton *leftButton = buttons[0];
+            NSButton *midButton = buttons[1];
+            NSButton *rightButton = buttons[2];
 
-            auto titlebar = rightButton.superview;
+            // standardWindowButton: returns nil for buttons the window does not have, and there
+            // is no NSWindow at all before the window is realized. Messaging nil yields a zeroed
+            // NSRect instead of crashing, so without these guards the whole layout would
+            // silently collapse onto a zero-height title bar. Anchor the geometry on a button
+            // that actually exists, preferring the middle one so that the common case where all
+            // three are present behaves exactly as before.
+            NSButton *refButton = midButton;
+            if (!refButton) {
+                refButton = leftButton;
+            }
+            if (!refButton) {
+                refButton = rightButton;
+            }
+            if (!refButton) {
+                return;
+            }
+
+            auto titlebar = refButton.superview;
+            if (!titlebar) {
+                return;
+            }
             int titlebarHeight = titlebar.frame.size.height;
 
-            auto spacing = midButton.frame.origin.x - leftButton.frame.origin.x;
-            auto width = midButton.frame.size.width;
-            auto height = midButton.frame.size.height;
+            // The gap between two adjacent buttons, which can only be measured when at least
+            // two of them are present. With fewer there is nothing to spread out anyway.
+            CGFloat spacing = 0;
+            if (leftButton && midButton) {
+                spacing = midButton.frame.origin.x - leftButton.frame.origin.x;
+            } else if (midButton && rightButton) {
+                spacing = rightButton.frame.origin.x - midButton.frame.origin.x;
+            } else if (leftButton && rightButton) {
+                spacing = (rightButton.frame.origin.x - leftButton.frame.origin.x) / 2;
+            }
+
+            auto width = refButton.frame.size.width;
+            auto height = refButton.frame.size.height;
 
             auto viewSize = nsview.frame.size;
             QPoint center = screenRectCallback(QSize(viewSize.width, titlebarHeight)).center();
@@ -267,21 +310,27 @@ namespace QWK {
                 center.x() - width / 2,
                 center.y() - height / 2,
             };
-            [midButton setFrameOrigin:centerOrigin];
+            if (midButton) {
+                [midButton setFrameOrigin:centerOrigin];
+            }
 
             // Left button
-            NSPoint leftOrigin = {
-                centerOrigin.x - spacing,
-                centerOrigin.y,
-            };
-            [leftButton setFrameOrigin:leftOrigin];
+            if (leftButton) {
+                NSPoint leftOrigin = {
+                    centerOrigin.x - spacing,
+                    centerOrigin.y,
+                };
+                [leftButton setFrameOrigin:leftOrigin];
+            }
 
             // Right button
-            NSPoint rightOrigin = {
-                centerOrigin.x + spacing,
-                centerOrigin.y,
-            };
-            [rightButton setFrameOrigin:rightOrigin];
+            if (rightButton) {
+                NSPoint rightOrigin = {
+                    centerOrigin.x + spacing,
+                    centerOrigin.y,
+                };
+                [rightButton setFrameOrigin:rightOrigin];
+            }
         }
 
         inline std::array<NSButton *, 3> systemButtons() {
@@ -319,34 +368,68 @@ namespace QWK {
         }
 
         // Blur effect
-        bool setBlurEffect(BlurMode mode) {
+        static NSString *blurEffectViewIdentifier() { return @"QWindowKitBlurEffectView"; }
+
+        NSVisualEffectView *findBlurEffectView(bool create) {
             static Class visualEffectViewClass = NSClassFromString(@"NSVisualEffectView");
             if (!visualEffectViewClass)
-                return false;
+                return nil;
 
-            NSVisualEffectView *effectView = nil;
-            for (NSView *subview in [[nsview superview] subviews]) {
-                if ([subview isKindOfClass:visualEffectViewClass]) {
-                    effectView = reinterpret_cast<NSVisualEffectView *>(subview);
+            NSView *container = [nsview superview];
+            if (!container) {
+                return nil;
+            }
+
+            const auto identifier = NSWindowProxy::blurEffectViewIdentifier();
+            for (NSView *subview in [container subviews]) {
+                if ([subview.identifier isEqualToString:identifier] &&
+                    [subview isKindOfClass:visualEffectViewClass]) {
+                    return reinterpret_cast<NSVisualEffectView *>(subview);
                 }
             }
-            if (effectView == nil) {
-                return false;
+
+            if (!create) {
+                return nil;
             }
 
-            static const auto originalMaterial = effectView.material;
-            static const auto originalBlendingMode = effectView.blendingMode;
-            static const auto originalState = effectView.state;
+            NSVisualEffectView *effectView =
+                [[visualEffectViewClass alloc] initWithFrame:container.bounds];
+            effectView.identifier = identifier;
+            effectView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            effectView.wantsLayer = YES;
+            effectView.layer.opaque = NO;
 
+            [container addSubview:effectView positioned:NSWindowBelow relativeTo:nsview];
+            [effectView release];
+            return effectView;
+        }
+
+        bool setBlurEffect(BlurMode mode) {
+            auto effectView = findBlurEffectView(mode != BlurMode::None);
+            if (!effectView) {
+                return mode == BlurMode::None;
+            }
+
+            effectView.frame = [effectView.superview bounds];
             if (mode == BlurMode::None) {
-                effectView.material = originalMaterial;
-                effectView.blendingMode = originalBlendingMode;
-                effectView.state = originalState;
-                effectView.appearance = nil;
+                effectView.hidden = YES;
             } else {
+                auto nswindow = [nsview window];
+                if (!nswindow) {
+                    return false;
+                }
+
+                nswindow.opaque = NO;
+                nswindow.backgroundColor = NSColor.clearColor;
+
+                nsview.wantsLayer = YES;
+                nsview.layer.opaque = NO;
+                nsview.layer.backgroundColor = NSColor.clearColor.CGColor;
+
+                effectView.hidden = NO;
                 effectView.material = NSVisualEffectMaterialUnderWindowBackground;
                 effectView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-                effectView.state = NSVisualEffectStateFollowsWindowActiveState;
+                effectView.state = NSVisualEffectStateActive;
 
                 if (mode == BlurMode::Dark) {
                     effectView.appearance =
@@ -357,6 +440,169 @@ namespace QWK {
                 }
             }
             return true;
+        }
+
+        // Glass effect
+        static Class glassEffectViewClass() {
+            if (@available(macOS 26.0, *)) {
+                static Class glassEffectViewClass = NSClassFromString(@"NSGlassEffectView");
+                return glassEffectViewClass;
+            }
+            return nil;
+        }
+
+        static bool isGlassEffectAvailable() { return glassEffectViewClass() != nil; }
+
+        NSView *findGlassEffectView(bool create) {
+            const auto glassEffectViewClass = NSWindowProxy::glassEffectViewClass();
+            if (!glassEffectViewClass) {
+                return nil;
+            }
+
+            NSView *container = [nsview superview];
+            if (!container) {
+                return nil;
+            }
+
+            static NSString *glassEffectViewIdentifier = @"QWindowKitGlassEffectView";
+            for (NSView *subview in [container subviews]) {
+                if ([subview.identifier isEqualToString:glassEffectViewIdentifier] &&
+                    [subview isKindOfClass:glassEffectViewClass]) {
+                    return subview;
+                }
+            }
+
+            if (!create) {
+                return nil;
+            }
+
+            NSView *glassView = [[glassEffectViewClass alloc] initWithFrame:container.bounds];
+            glassView.identifier = glassEffectViewIdentifier;
+            glassView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            glassView.wantsLayer = YES;
+            glassView.layer.opaque = NO;
+
+            NSView *contentView = [[NSView alloc] initWithFrame:glassView.bounds];
+            contentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [glassView setValue:contentView forKey:@"contentView"];
+            [contentView release];
+
+            [container addSubview:glassView positioned:NSWindowBelow relativeTo:nsview];
+            [glassView release];
+            return glassView;
+        }
+
+        NSColor *glassTintNSColor() const {
+            if (!glassTintColor.isValid()) {
+                return nil;
+            }
+            return [NSColor colorWithSRGBRed:glassTintColor.redF()
+                                       green:glassTintColor.greenF()
+                                       blue:glassTintColor.blueF()
+                                       alpha:glassTintColor.alphaF()];
+        }
+
+        void updateGlassContainerCornerRadius(NSView *glassView) {
+            NSView *container = glassView ? glassView.superview : [nsview superview];
+            if (!container) {
+                return;
+            }
+
+            if (!glassContainerLayerStateCaptured) {
+                originalGlassContainerWantsLayer = container.wantsLayer;
+                if (container.layer) {
+                    originalGlassContainerCornerRadius = container.layer.cornerRadius;
+                    originalGlassContainerMasksToBounds = container.layer.masksToBounds;
+                }
+                glassContainerLayerStateCaptured = true;
+            }
+
+            const auto needsCustomRadius = glassMode != GlassMode::None && glassCornerRadius > 0;
+            container.wantsLayer = needsCustomRadius || originalGlassContainerWantsLayer;
+
+            auto layer = container.layer;
+            if (!layer) {
+                return;
+            }
+
+            layer.cornerRadius = needsCustomRadius ? glassCornerRadius
+                                                   : originalGlassContainerCornerRadius;
+            layer.masksToBounds = needsCustomRadius ? YES : originalGlassContainerMasksToBounds;
+
+            if (!needsCustomRadius && !originalGlassContainerWantsLayer) {
+                container.wantsLayer = NO;
+            }
+        }
+
+        bool applyGlassEffectSettings(NSView *glassView) {
+            if (!glassView) {
+                return false;
+            }
+
+            glassView.frame = [glassView.superview bounds];
+            glassView.hidden = glassMode == GlassMode::None;
+            if (glassMode == GlassMode::None) {
+                updateGlassContainerCornerRadius(glassView);
+                return true;
+            }
+
+            const auto glassEffectViewClass = NSWindowProxy::glassEffectViewClass();
+            if (!glassEffectViewClass || ![glassView isKindOfClass:glassEffectViewClass]) {
+                return false;
+            }
+
+            auto nswindow = [nsview window];
+            if (!nswindow) {
+                return false;
+            }
+
+            nswindow.opaque = NO;
+            nswindow.backgroundColor = NSColor.clearColor;
+
+            nsview.wantsLayer = YES;
+            nsview.layer.opaque = NO;
+            nsview.layer.backgroundColor = NSColor.clearColor.CGColor;
+
+            updateGlassContainerCornerRadius(glassView);
+            [glassView setValue:@(glassMode == GlassMode::Clear ? 1 : 0) forKey:@"style"];
+            [glassView setValue:@(glassCornerRadius) forKey:@"cornerRadius"];
+            [glassView setValue:glassTintNSColor() forKey:@"tintColor"];
+            return true;
+        }
+
+        bool setGlassEffect(GlassMode mode) {
+            if (mode == GlassMode::None) {
+                glassMode = mode;
+                if (auto glassView = findGlassEffectView(false)) {
+                    return applyGlassEffectSettings(glassView);
+                }
+                return true;
+            }
+
+            if (!isGlassEffectAvailable()) {
+                return false;
+            }
+
+            glassMode = mode;
+            return applyGlassEffectSettings(findGlassEffectView(true));
+        }
+
+        bool setGlassCornerRadius(qreal radius) {
+            glassCornerRadius = std::max<qreal>(0, radius);
+
+            if (glassMode == GlassMode::None) {
+                return true;
+            }
+            return applyGlassEffectSettings(findGlassEffectView(true));
+        }
+
+        bool setGlassTintColor(const QColor &color) {
+            glassTintColor = color;
+
+            if (glassMode == GlassMode::None) {
+                return true;
+            }
+            return applyGlassEffectSettings(findGlassEffectView(true));
         }
 
         // System title bar
@@ -378,13 +624,22 @@ namespace QWK {
             nswindow.hasShadow = YES;
             // nswindow.showsToolbarButton = NO;
             nswindow.movableByWindowBackground = NO;
-            nswindow.movable = NO; // This line causes the window in the wrong position when
-                                   // become fullscreen.
+            // Keep Fill/Center enabled; Qt's event filter owns title-bar dragging.
+            // See https://developer.apple.com/documentation/appkit/nswindow/ismovable?language=objc
+            nswindow.movable = YES;
 
             NSWindowProxy *self_ = this;
+            const auto lifetimeToken_ = lifetimeToken;
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (!lifetimeToken_->load(std::memory_order_acquire)) {
+                    return;
+                }
+                
                 NSMutableArray<NSButton *> *array = [NSMutableArray arrayWithCapacity:3];
                 for (NSButton *button : self_->systemButtons()) {
+                    if (!button) {
+                        continue;
+                    }
                     button.hidden = !self_->systemButtonVisible;
                     [array addObject:button];
                 }
@@ -394,7 +649,7 @@ namespace QWK {
             });
         }
 
-        static void replaceImplementations() {
+        static void replaceImplementations(Class nativeViewClass) {
             Method method = class_getInstanceMethod(windowClass, @selector(setStyleMask:));
             oldSetStyleMask = reinterpret_cast<setStyleMaskPtr>(
                 method_setImplementation(method, reinterpret_cast<IMP>(setStyleMask)));
@@ -416,6 +671,12 @@ namespace QWK {
             method = class_getInstanceMethod(windowClass, @selector(sendEvent:));
             oldSendEvent = reinterpret_cast<sendEventPtr>(
                 method_setImplementation(method, reinterpret_cast<IMP>(sendEvent)));
+
+            viewClass = nativeViewClass;
+            method = class_getInstanceMethod(viewClass, @selector(mouseDownCanMoveWindow));
+            oldMouseDownCanMoveWindow = reinterpret_cast<mouseDownCanMoveWindowPtr>(method_getImplementation(method));
+            class_replaceMethod(viewClass, @selector(mouseDownCanMoveWindow), reinterpret_cast<IMP>(mouseDownCanMoveWindow),
+                                method_getTypeEncoding(method));
 
             // Alloc
             windowObserver = [[QWK_NSWindowObserver alloc] init];
@@ -446,14 +707,30 @@ namespace QWK {
             method_setImplementation(method, reinterpret_cast<IMP>(oldSendEvent));
             oldSendEvent = nil;
 
+            method = class_getInstanceMethod(viewClass, @selector(mouseDownCanMoveWindow));
+            class_replaceMethod(viewClass, @selector(mouseDownCanMoveWindow),
+                                reinterpret_cast<IMP>(oldMouseDownCanMoveWindow),
+                                method_getTypeEncoding(method));
+            oldMouseDownCanMoveWindow = nil;
+            viewClass = Nil;
+
             // Delete
             [windowObserver release];
             windowObserver = nil;
         }
 
         static inline const Class windowClass = [NSWindow class];
+        static inline Class viewClass = Nil;
 
     protected:
+        static BOOL mouseDownCanMoveWindow(id obj, SEL sel) {
+            if (g_proxyList->contains(reinterpret_cast<WId>(obj))) {
+                return NO;
+            }
+
+            return oldMouseDownCanMoveWindow(obj, sel);
+        }
+
         static BOOL canBecomeKeyWindow(id obj, SEL sel) {
             auto nswindow = reinterpret_cast<NSWindow *>(obj);
             auto nsview = [nswindow contentView];
@@ -533,10 +810,20 @@ namespace QWK {
         NSView *nsview = nil;
         QWK_NSViewObserver* observer = nil;
         QWK_NSButtonObserver* buttonObserver = nil;
-
+        
+        std::shared_ptr<std::atomic_bool> lifetimeToken = std::make_shared<std::atomic_bool>(true);
+        
         bool systemButtonVisible = true;
         bool checkButton = true;
         ScreenRectCallback screenRectCallback;
+
+        GlassMode glassMode = GlassMode::None;
+        qreal glassCornerRadius = 0;
+        QColor glassTintColor;
+        bool glassContainerLayerStateCaptured = false;
+        BOOL originalGlassContainerWantsLayer = NO;
+        CGFloat originalGlassContainerCornerRadius = 0;
+        BOOL originalGlassContainerMasksToBounds = NO;
 
         static inline QWK_NSWindowObserver *windowObserver = nil;
 
@@ -556,6 +843,9 @@ namespace QWK {
 
         using sendEventPtr = void (*)(id, SEL, NSEvent *);
         static inline sendEventPtr oldSendEvent = nil;
+
+        using mouseDownCanMoveWindowPtr = BOOL (*)(id, SEL);
+        static inline mouseDownCanMoveWindowPtr oldMouseDownCanMoveWindow = nil;
     };
 
     static inline NSWindow *mac_getNSWindow(const WId windowId) {
@@ -564,13 +854,13 @@ namespace QWK {
     }
 
     static inline NSWindowProxy *ensureWindowProxy(const WId windowId) {
+        NSView *nsview = reinterpret_cast<NSView *>(windowId);
         if (g_proxyList->isEmpty()) {
-            NSWindowProxy::replaceImplementations();
+            NSWindowProxy::replaceImplementations([nsview class]);
         }
 
         auto it = g_proxyList->find(windowId);
         if (it == g_proxyList->end()) {
-            NSView *nsview = reinterpret_cast<NSView *>(windowId);
             const auto proxy = new NSWindowProxy(nsview);
             it = g_proxyList->insert(windowId, proxy);
         }
@@ -740,6 +1030,15 @@ namespace QWK {
     void CocoaWindowContext::virtual_hook(int id, void *data) {
         switch (id) {
             case SystemButtonAreaChangedHook: {
+                // This hook fires whenever the callback is set or the system button area item
+                // moves or resizes, and both happen freely before the window has a native
+                // handle. Calling ensureWindowProxy() with a null WId would swizzle against a
+                // nil view class and park a bogus proxy in g_proxyList, which then never gets
+                // empty again and prevents the real window from ever being set up. The callback
+                // is kept in m_systemButtonAreaCallback and applied by winIdChanged() as soon as
+                // the window exists, so there is nothing to do here yet.
+                if (!m_windowId)
+                    return;
                 ensureWindowProxy(m_windowId)->setScreenRectCallback(m_systemButtonAreaCallback);
                 return;
             }
@@ -827,6 +1126,71 @@ namespace QWK {
                 return false;
             }
             return ensureWindowProxy(m_windowId)->setBlurEffect(mode);
+        }
+
+        if (key == QStringLiteral("glass-effect")) {
+            auto mode = NSWindowProxy::GlassMode::None;
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+            if (attribute.type() == QVariant::Bool) {
+#else
+            if (attribute.typeId() == QMetaType::Type::Bool) {
+#endif
+                mode = attribute.toBool() ? NSWindowProxy::GlassMode::Regular
+                                          : NSWindowProxy::GlassMode::None;
+#if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
+            } else if (attribute.type() == QVariant::String) {
+#else
+            } else if (attribute.typeId() == QMetaType::Type::QString) {
+#endif
+                const auto value = attribute.toString();
+                if (value == QStringLiteral("regular")) {
+                    mode = NSWindowProxy::GlassMode::Regular;
+                } else if (value == QStringLiteral("clear")) {
+                    mode = NSWindowProxy::GlassMode::Clear;
+                } else if (value == QStringLiteral("none")) {
+                    // ...
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            return ensureWindowProxy(m_windowId)->setGlassEffect(mode);
+        }
+
+        if (key == QStringLiteral("glass-corner-radius")) {
+            bool ok = false;
+            const auto radius = attribute.toDouble(&ok);
+            if (!ok) {
+                return false;
+            }
+            return ensureWindowProxy(m_windowId)->setGlassCornerRadius(radius);
+        }
+
+        if (key == QStringLiteral("glass-tint-color")) {
+            if (attribute.isNull()) {
+                return ensureWindowProxy(m_windowId)->setGlassTintColor(QColor());
+            }
+
+            QColor color;
+            if (attribute.canConvert<QColor>()) {
+                color = attribute.value<QColor>();
+            }
+
+            if (!color.isValid() && attribute.canConvert<QString>()) {
+                const auto value = attribute.toString();
+                if (value.isEmpty() || value == QStringLiteral("none") ||
+                    value == QStringLiteral("transparent")) {
+                    return ensureWindowProxy(m_windowId)->setGlassTintColor(QColor());
+                }
+                color = QColor(value);
+            }
+
+            if (!color.isValid()) {
+                return false;
+            }
+
+            return ensureWindowProxy(m_windowId)->setGlassTintColor(color);
         }
         return false;
     }

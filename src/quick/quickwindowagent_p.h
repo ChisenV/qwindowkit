@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +13,8 @@
 // implementation detail. This header file may change from version to
 // version without notice, or may even be removed.
 //
+
+#include <QPointer>
 
 #include <QWKCore/qwkconfig.h>
 #include <QWKCore/private/windowagentbase_p.h>
@@ -38,6 +40,13 @@ namespace QWK {
 
 #if defined(Q_OS_WINDOWS) && QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
         void setupWindows10BorderWorkaround();
+
+        // The Win10 border workaround item is reparented into the host
+        // window's content item and holds a raw context pointer; it must be
+        // tracked and destroyed together with the agent (strictly before the
+        // context unique_ptr), or the window teardown dereferences freed
+        // memory through BorderItem::itemChange().
+        QPointer<QQuickItem> win10BorderItem{};
 #endif
     };
 

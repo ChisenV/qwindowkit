@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -124,7 +124,7 @@ namespace QWK {
                     bool exposeRegionValid = !ee->region().isNull();
 #endif
                     auto window = widget->windowHandle();
-                    if (window->isExposed() && isNormalWindow() && exposeRegionValid) {
+                    if (window && window->isExposed() && isNormalWindow() && exposeRegionValid) {
                         forwardEventToWindowAndDraw(window, event);
                         return true;
                     }

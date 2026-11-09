@@ -1,9 +1,10 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
 #include "win32windowcontext_p.h"
 
+#include <cstdlib>
 #include <optional>
 
 #include <QtCore/QAbstractEventDispatcher>
@@ -71,6 +72,20 @@ namespace QWK {
 
     // Original Qt window proc function
     static WNDPROC g_qtWindowProc = nullptr;
+
+    static bool isLikelyFrameDriftAfterWinIdChange(HWND hwnd, const RECT &expectedFrameRect,
+                                                   const RECT &candidateFrameRect) {
+        const int dx = candidateFrameRect.left - expectedFrameRect.left;
+        const int dy = candidateFrameRect.top - expectedFrameRect.top;
+        const int dw = RECT_WIDTH(candidateFrameRect) - RECT_WIDTH(expectedFrameRect);
+        const int dh = RECT_HEIGHT(candidateFrameRect) - RECT_HEIGHT(expectedFrameRect);
+        const int expectedDrift =
+            getTitleBarHeight(hwnd) +
+            (isWin11OrGreater() ? getWindowFrameBorderThickness(hwnd) : 0);
+
+        return std::abs(dx) <= 1 && std::abs(dw) <= 2 && std::abs(dh) <= 2 && dy > 0 &&
+               std::abs(dy - expectedDrift) <= 2;
+    }
 
     static inline bool
 #if !QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
@@ -386,9 +401,7 @@ namespace QWK {
         if (((message >= WM_NCCREATE) && (message <= WM_NCACTIVATE)) ||
             ((message >= WM_NCMOUSEMOVE) && (message <= WM_NCMBUTTONDBLCLK)) ||
             ((message >= WM_NCXBUTTONDOWN) && (message <= WM_NCXBUTTONDBLCLK))
-#if (WINVER >= _WIN32_WINNT_WIN8)
             || ((message >= WM_NCPOINTERUPDATE) && (message <= WM_NCPOINTERUP))
-#endif
             || ((message == WM_NCMOUSEHOVER) || (message == WM_NCMOUSELEAVE))) {
             return true;
         } else {
@@ -664,9 +677,19 @@ namespace QWK {
         Q_ASSERT(hWnd);
         Q_ASSERT(ctx);
 
+        // Qt creates a decorated HWND from its requested client geometry before
+        // we install the NCCALCSIZE hook. Removing the non-client area while
+        // keeping that HWND's size would turn the old frame into extra client
+        // pixels, on both the first setup and every subsequent recreation.
+        RECT clientRect{};
+        RECT frameRect{};
+        const bool preserveClientGeometry = !isSystemBorderEnabled() &&
+            ::GetClientRect(hWnd, &clientRect) &&
+            ::GetWindowRect(hWnd, &frameRect);
+
         if (isSystemBorderEnabled()) {
             // Inform Qt we want and have set custom margins
-            setInternalWindowFrameMargins(window, QMargins(0, -int(getTitleBarHeight(hWnd)), 0, 0));
+            setInternalWindowFrameMargins(window, QMargins(0, -getTitleBarHeight(hWnd), 0, 0));
         }
 
         // Store original window proc
@@ -686,7 +709,13 @@ namespace QWK {
         // Force a WM_NCCALCSIZE message manually to avoid the title bar become visible
         // while Qt is re-creating the window (such as setWindowFlag(s) calls). It has
         // been observed by our users.
-        triggerFrameChange(hWnd);
+        if (preserveClientGeometry && isWindowNoState(hWnd)) {
+            ::SetWindowPos(hWnd, nullptr, frameRect.left, frameRect.top,
+                           RECT_WIDTH(clientRect), RECT_HEIGHT(clientRect),
+                           SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        } else {
+            triggerFrameChange(hWnd);
+        }
     }
 
     static inline void removeManagedWindow(HWND hWnd) {
@@ -695,6 +724,17 @@ namespace QWK {
         // Remove window handle mapping
         if (!g_wndProcHash->remove(hWnd))
             return;
+
+        // Unhook the window procedure, but only when ours is still the one installed. Anybody
+        // is free to subclass the window after we did, and writing g_qtWindowProc back
+        // unconditionally would silently drop them out of the chain. When that happens we
+        // simply leave QWKHookedWndProc in place: with no context left in g_wndProcHash it
+        // forwards everything straight to g_qtWindowProc anyway.
+        if (g_qtWindowProc &&
+            reinterpret_cast<WNDPROC>(::GetWindowLongPtrW(hWnd, GWLP_WNDPROC)) ==
+                QWKHookedWndProc) {
+            ::SetWindowLongPtrW(hWnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_qtWindowProc));
+        }
 
         // Remove event filter if the all windows has been destroyed
         if (g_wndProcHash->empty()) {
@@ -861,12 +901,12 @@ namespace QWK {
 
         if (key == QStringLiteral("border-thickness")) {
             return m_windowId
-                       ? int(getWindowFrameBorderThickness(reinterpret_cast<HWND>(m_windowId)))
+                       ? getWindowFrameBorderThickness(reinterpret_cast<HWND>(m_windowId))
                        : 0;
         }
 
         if (key == QStringLiteral("title-bar-height")) {
-            return m_windowId ? int(getTitleBarHeight(reinterpret_cast<HWND>(m_windowId))) : 0;
+            return m_windowId ? getTitleBarHeight(reinterpret_cast<HWND>(m_windowId)) : 0;
         }
         return AbstractWindowContext::windowAttribute(key);
     }
@@ -879,9 +919,21 @@ namespace QWK {
 
         // If the original window id is valid, remove all resources related
         if (oldWinId) {
-            removeManagedWindow(reinterpret_cast<HWND>(oldWinId));
+            const auto oldHWnd = reinterpret_cast<HWND>(oldWinId);
+            if (!restoringFrameRectAfterWinIdChange && isValidWindow(oldHWnd, false, true) &&
+                isWindowNoState(oldHWnd)) {
+                hasFrameRectBeforeWinIdChange =
+                    ::GetWindowRect(oldHWnd, &frameRectBeforeWinIdChange) != FALSE;
+            }
+            removeManagedWindow(oldHWnd);
         }
         if (!winId) {
+            QTimer::singleShot(0, this, [this]() {
+                if (!m_windowId) {
+                    hasFrameRectBeforeWinIdChange = false;
+                    hasPendingFrameRectAfterWinIdChange = false;
+                }
+            });
             return;
         }
 
@@ -910,6 +962,43 @@ namespace QWK {
 
         // Add managed window
         addManagedWindow(m_windowHandle, hWnd, this);
+
+        if (hasFrameRectBeforeWinIdChange && !restoringFrameRectAfterWinIdChange) {
+            pendingFrameRectAfterWinIdChange = frameRectBeforeWinIdChange;
+            hasPendingFrameRectAfterWinIdChange = true;
+            const RECT expectedFrameRect = pendingFrameRectAfterWinIdChange;
+            hasFrameRectBeforeWinIdChange = false;
+
+            QTimer::singleShot(0, this, [this, winId, expectedFrameRect]() {
+                if (m_windowId != winId || !m_windowHandle) {
+                    return;
+                }
+
+                const auto hWnd = reinterpret_cast<HWND>(m_windowId);
+                if (!isValidWindow(hWnd, false, true) || !isWindowNoState(hWnd)) {
+                    hasPendingFrameRectAfterWinIdChange = false;
+                    return;
+                }
+
+                RECT currentFrameRect{};
+                if (!::GetWindowRect(hWnd, &currentFrameRect)) {
+                    hasPendingFrameRectAfterWinIdChange = false;
+                    return;
+                }
+
+                if (!isLikelyFrameDriftAfterWinIdChange(hWnd, expectedFrameRect,
+                                                        currentFrameRect)) {
+                    hasPendingFrameRectAfterWinIdChange = false;
+                    return;
+                }
+
+                restoringFrameRectAfterWinIdChange = true;
+                ::SetWindowPos(hWnd, nullptr, expectedFrameRect.left, expectedFrameRect.top, 0, 0,
+                               SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                restoringFrameRectAfterWinIdChange = false;
+                hasPendingFrameRectAfterWinIdChange = false;
+            });
+        }
     }
 
     bool Win32WindowContext::windowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam,
@@ -935,6 +1024,36 @@ namespace QWK {
 
         if (!isValidWindow(hWnd, false, true)) {
             return false;
+        }
+
+        if (message == WM_WINDOWPOSCHANGING && hasPendingFrameRectAfterWinIdChange &&
+            !restoringFrameRectAfterWinIdChange) {
+            auto pos = reinterpret_cast<WINDOWPOS *>(lParam);
+            if (pos && !(pos->flags & SWP_NOMOVE)) {
+                RECT candidateFrameRect{};
+                candidateFrameRect.left = pos->x;
+                candidateFrameRect.top = pos->y;
+                if (pos->flags & SWP_NOSIZE) {
+                    RECT currentFrameRect{};
+                    if (::GetWindowRect(hWnd, &currentFrameRect)) {
+                        candidateFrameRect.right =
+                            candidateFrameRect.left + RECT_WIDTH(currentFrameRect);
+                        candidateFrameRect.bottom =
+                            candidateFrameRect.top + RECT_HEIGHT(currentFrameRect);
+                    }
+                } else {
+                    candidateFrameRect.right = candidateFrameRect.left + pos->cx;
+                    candidateFrameRect.bottom = candidateFrameRect.top + pos->cy;
+                }
+
+                if (candidateFrameRect.right > candidateFrameRect.left &&
+                    candidateFrameRect.bottom > candidateFrameRect.top &&
+                    isLikelyFrameDriftAfterWinIdChange(hWnd, pendingFrameRectAfterWinIdChange,
+                                                       candidateFrameRect)) {
+                    pos->x = pendingFrameRectAfterWinIdChange.left;
+                    pos->y = pendingFrameRectAfterWinIdChange.top;
+                }
+            }
         }
 
         // Test snap layout
@@ -1981,7 +2100,7 @@ namespace QWK {
                 static constexpr const auto kBadWindowPosFlag =
                     SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED;
                 const auto windowPos = reinterpret_cast<LPWINDOWPOS>(lParam);
-                if (windowPos->flags == kBadWindowPosFlag) {
+                if (windowPos && windowPos->flags == kBadWindowPosFlag) {
                     windowPos->flags |= SWP_NOCOPYBITS;
                 }
                 break;
@@ -2122,17 +2241,19 @@ namespace QWK {
                 }
                 case WM_SETICON:
                 case WM_SETTEXT: {
-                    // Disable painting while these messages are handled to prevent them
-                    // from drawing a window caption over the client area.
+                    // Suppress native caption painting without hiding the window.
+                    // Toggling WS_VISIBLE and forcing frame changes interrupts
+                    // DirectComposition, causing transparent Quick windows to blink.
                     const auto oldStyle = static_cast<DWORD>(::GetWindowLongPtrW(hWnd, GWL_STYLE));
-                    // Prevent Windows from drawing the default title bar by temporarily
-                    // toggling the WS_VISIBLE style.
-                    const DWORD newStyle = (oldStyle & ~WS_VISIBLE);
+                    // The caption style is consulted by DefWindowProc when repainting
+                    // text and icons. Restore it without recalculating the frame so
+                    // client geometry, shadows and native hit testing stay intact.
+                    const DWORD newStyle = (oldStyle & ~WS_CAPTION);
                     ::SetWindowLongPtrW(hWnd, GWL_STYLE, static_cast<LONG_PTR>(newStyle));
-                    triggerFrameChange(hWnd);
+                    const auto restoreStyle = qScopeGuard([hWnd, oldStyle]() {
+                        ::SetWindowLongPtrW(hWnd, GWL_STYLE, static_cast<LONG_PTR>(oldStyle));
+                    });
                     const LRESULT originalResult = ::DefWindowProcW(hWnd, message, wParam, lParam);
-                    ::SetWindowLongPtrW(hWnd, GWL_STYLE, static_cast<LONG_PTR>(oldStyle));
-                    triggerFrameChange(hWnd);
                     *result = originalResult;
                     return true;
                 }
@@ -2322,7 +2443,7 @@ namespace QWK {
             // then the window is clipped to the monitor so that the resize handle
             // do not appear because you don't need them (because you can't resize
             // a window when it's maximized unless you restore it).
-            const quint32 frameSize = getResizeBorderThickness(hWnd);
+            const LONG frameSize = getResizeBorderThickness(hWnd);
             clientRect->top += frameSize;
             if (!isSystemBorderEnabled()) {
                 clientRect->bottom -= frameSize;
@@ -2429,11 +2550,11 @@ namespace QWK {
         };
         const auto getNativeGlobalPosFromKeyboard = [hWnd]() -> POINT {
             const bool maxOrFull = isMaximized(hWnd) || isFullScreen(hWnd);
-            const quint32 frameSize = getResizeBorderThickness(hWnd);
-            const quint32 horizontalOffset =
+            const int frameSize = getResizeBorderThickness(hWnd);
+            const int horizontalOffset =
                 ((maxOrFull || !isSystemBorderEnabled()) ? 0 : frameSize);
-            const auto verticalOffset = [hWnd, maxOrFull, frameSize]() -> quint32 {
-                const quint32 titleBarHeight = getTitleBarHeight(hWnd);
+            const auto verticalOffset = [hWnd, maxOrFull, frameSize]() -> int {
+                const int titleBarHeight = getTitleBarHeight(hWnd);
                 if (!isSystemBorderEnabled()) {
                     return titleBarHeight;
                 }
@@ -2523,9 +2644,8 @@ namespace QWK {
             if (iconButtonClickTime > 0) {
                 POINT menuPos{0, static_cast<LONG>(getTitleBarHeight(hWnd))};
                 if (const auto tb = titleBar()) {
-                    auto titleBarHeight = qreal(m_delegate->mapGeometryToScene(tb).height());
-                    titleBarHeight *= m_windowHandle->devicePixelRatio();
-                    menuPos.y = qRound(titleBarHeight);
+                    const int titleBarHeight = m_delegate->mapGeometryToScene(tb).height();
+                    menuPos.y = QHighDpi::toNativeLocalPosition(QPoint(0, titleBarHeight), m_windowHandle.data()).y();
                 }
                 ::ClientToScreen(hWnd, &menuPos);
                 nativeGlobalPos = menuPos;

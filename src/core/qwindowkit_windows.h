@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -59,6 +59,19 @@
 
 #ifndef WM_NCUAHDRAWFRAME
 #  define WM_NCUAHDRAWFRAME (0x00AF)
+#endif
+
+// Required missing messages under windows 7
+#ifndef WM_NCPOINTERUPDATE
+#  define WM_NCPOINTERUPDATE (0x0241)
+#endif
+
+#ifndef WM_NCPOINTERDOWN
+#  define WM_NCPOINTERDOWN (0x0242)
+#endif
+
+#ifndef WM_NCPOINTERUP
+#  define WM_NCPOINTERUP (0x0243)
 #endif
 
 using QWK_OSVERSIONINFOW = struct _QWK_OSVERSIONINFOW {

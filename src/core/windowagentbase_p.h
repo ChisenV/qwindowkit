@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -27,7 +27,7 @@ namespace QWK {
 
         void init();
 
-        WindowAgentBase *q_ptr; // no need to initialize
+        WindowAgentBase *q_ptr = nullptr;
 
         virtual AbstractWindowContext *createContext() const;
 

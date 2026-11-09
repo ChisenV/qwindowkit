@@ -1,4 +1,4 @@
-// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -22,7 +22,15 @@ namespace QWK {
 
     QuickWindowAgentPrivate::QuickWindowAgentPrivate() = default;
 
-    QuickWindowAgentPrivate::~QuickWindowAgentPrivate() = default;
+    QuickWindowAgentPrivate::~QuickWindowAgentPrivate() {
+#if defined(Q_OS_WINDOWS) && QWINDOWKIT_CONFIG(ENABLE_WINDOWS_SYSTEM_BORDERS)
+        // Runs before the base destructor releases the context, so the
+        // BorderItem teardown (itemChange -> updateGeometry -> context) is
+        // still safe; QPointer guards the case where the item was already
+        // destroyed together with its visual QObject parent.
+        delete win10BorderItem.data();
+#endif
+    }
 
     void QuickWindowAgentPrivate::init() {
     }
@@ -83,10 +91,11 @@ namespace QWK {
     }
 
 #if (QT_VERSION < QT_VERSION_CHECK(6, 0, 0))
-    bool QuickWindowAgent::isHitTestVisible(QQuickItem *item) const {
+    bool QuickWindowAgent::isHitTestVisible(QQuickItem *item) const
 #else
-    bool QuickWindowAgent::isHitTestVisible(const QQuickItem *item) const {
+    bool QuickWindowAgent::isHitTestVisible(const QQuickItem *item) const
 #endif
+    {
         Q_D(const QuickWindowAgent);
         return d->context->isHitTestVisible(item);
     }

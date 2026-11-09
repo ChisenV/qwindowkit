@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2023-2024 Stdware Collections (https://www.github.com/stdware)
+﻿// Copyright (C) 2023-present Stdware Collections (https://www.github.com/stdware)
 // Copyright (C) 2021-2023 wangwenx190 (Yuhang Zhao)
 // SPDX-License-Identifier: Apache-2.0
 
@@ -42,7 +42,6 @@ namespace QWK {
         WId winId() const override;
 
     protected:
-        QWindow *win;
         bool isAboutToBeDestroyed;
 
         bool eventFilter(QObject *obj, QEvent *event) override;
